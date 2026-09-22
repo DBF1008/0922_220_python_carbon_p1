@@ -89,3 +89,87 @@ class ExistingConfigSchemaLoadingTest(TestCase):
         schema_list = loadAggregationSchemas()
         last_schema = schema_list[-1]
         self.assertEqual(last_schema, defaultAggregation)
+
+
+class InvalidAggregationSchemaLoadingTest(TestCase):
+
+    def setUp(self):
+        test_directory = os.path.dirname(os.path.realpath(__file__))
+        config_dir = os.path.join(test_directory, 'data', 'conf-invalid-aggregation')
+        settings = TestSettings()
+        settings['CONF_DIR'] = config_dir
+        settings['LOCAL_DATA_DIR'] = ''
+        self._database_patch = patch('carbon.state.database', new=WhisperDatabase(settings))
+        self._database_patch.start()
+        self._config_patch = patch(
+            'carbon.storage.STORAGE_AGGREGATION_CONFIG',
+            os.path.join(config_dir, 'storage-aggregation.conf'))
+        self._config_patch.start()
+
+    def tearDown(self):
+        self._config_patch.stop()
+        self._database_patch.stop()
+
+    def test_loadAggregationSchemas_skips_invalid_sections(self):
+        from carbon.storage import loadAggregationSchemas
+        schema_list = loadAggregationSchemas()
+        self.assertEqual([s.name for s in schema_list], ['min', 'max', 'default'])
+
+    def test_loadAggregationSchemas_keeps_valid_section_values(self):
+        from carbon.storage import loadAggregationSchemas
+        schema_list = loadAggregationSchemas()
+        schemas = dict((s.name, s) for s in schema_list)
+        self.assertEqual(schemas['min'].archives, (0.1, 'min'))
+        self.assertEqual(schemas['max'].archives, (0.2, 'max'))
+
+    def test_loadAggregationSchemas_returns_default_schema_last(self):
+        from carbon.storage import loadAggregationSchemas, defaultAggregation
+        schema_list = loadAggregationSchemas()
+        self.assertEqual(schema_list[-1], defaultAggregation)
+
+
+class ReloadAggregationSchemasTest(TestCase):
+
+    def setUp(self):
+        test_directory = os.path.dirname(os.path.realpath(__file__))
+        good_dir = os.path.join(test_directory, 'data', 'conf-directory')
+        bad_dir = os.path.join(test_directory, 'data', 'conf-invalid-aggregation')
+        settings = TestSettings()
+        settings['CONF_DIR'] = good_dir
+        settings['LOCAL_DATA_DIR'] = ''
+        self._bad_aggregation_config = os.path.join(bad_dir, 'storage-aggregation.conf')
+        self._database_patch = patch('carbon.state.database', new=WhisperDatabase(settings))
+        self._database_patch.start()
+        self._config_patches = [
+            patch('carbon.storage.STORAGE_SCHEMAS_CONFIG',
+                  os.path.join(good_dir, 'storage-schemas.conf')),
+            patch('carbon.storage.STORAGE_AGGREGATION_CONFIG',
+                  os.path.join(good_dir, 'storage-aggregation.conf')),
+        ]
+        for config_patch in self._config_patches:
+            config_patch.start()
+        from carbon import writer
+        self.writer = writer
+
+    def tearDown(self):
+        for config_patch in self._config_patches:
+            config_patch.stop()
+        self._database_patch.stop()
+
+    def test_reload_applies_valid_schemas(self):
+        self.writer.reloadAggregationSchemas()
+        names = [s.name for s in self.writer.AGGREGATION_SCHEMAS]
+        self.assertEqual(names, ['min', 'max', 'sum', 'default_average', 'default'])
+
+    def test_reload_skips_invalid_sections(self):
+        with patch('carbon.storage.STORAGE_AGGREGATION_CONFIG', self._bad_aggregation_config):
+            self.writer.reloadAggregationSchemas()
+        names = [s.name for s in self.writer.AGGREGATION_SCHEMAS]
+        self.assertEqual(names, ['min', 'max', 'default'])
+
+    def test_reload_keeps_previous_schemas_on_load_failure(self):
+        self.writer.reloadAggregationSchemas()
+        previous = list(self.writer.AGGREGATION_SCHEMAS)
+        with patch('carbon.writer.loadAggregationSchemas', side_effect=Exception('boom')):
+            self.writer.reloadAggregationSchemas()
+        self.assertEqual(self.writer.AGGREGATION_SCHEMAS, previous)
