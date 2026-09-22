@@ -1,7 +1,11 @@
 import os
+import shutil
+import tempfile
 from unittest import TestCase
+
 from mock import patch
 
+from carbon import log
 from carbon.tests.util import TestSettings
 from carbon.database import WhisperDatabase
 
@@ -89,3 +93,114 @@ class ExistingConfigSchemaLoadingTest(TestCase):
         schema_list = loadAggregationSchemas()
         last_schema = schema_list[-1]
         self.assertEqual(last_schema, defaultAggregation)
+
+
+class InvalidAggregationConfigSchemaLoadingTest(TestCase):
+    """Bad sections must be logged and skipped, never abort the whole load."""
+
+    VALID_SECTION = (
+        "[good]\n"
+        "pattern = \\.ok$\n"
+        "xFilesFactor = 0.5\n"
+        "aggregationMethod = average\n"
+    )
+
+    def setUp(self):
+        self.test_directory = tempfile.mkdtemp()
+        settings = TestSettings()
+        settings['CONF_DIR'] = self.test_directory
+        settings['LOCAL_DATA_DIR'] = ''
+        self._settings_patch = patch('carbon.conf.settings', settings)
+        self._settings_patch.start()
+        self._database_patch = patch('carbon.state.database', new=WhisperDatabase(settings))
+        self._database_patch.start()
+        import carbon.storage as storage
+        self._aggregation_config_patch = patch.object(
+            storage, 'STORAGE_AGGREGATION_CONFIG',
+            os.path.join(self.test_directory, 'storage-aggregation.conf'))
+        self._aggregation_config_patch.start()
+
+    def tearDown(self):
+        self._aggregation_config_patch.stop()
+        self._database_patch.stop()
+        self._settings_patch.stop()
+        shutil.rmtree(self.test_directory)
+
+    def _writeAggregationConfig(self, body):
+        with open(self._aggregation_config_patch.new, 'w') as f:
+            f.write(body)
+
+    def _load(self):
+        from carbon.storage import loadAggregationSchemas
+        return loadAggregationSchemas()
+
+    def test_xfilesfactor_out_of_bounds_section_is_skipped(self):
+        self._writeAggregationConfig(self.VALID_SECTION + (
+            "[bad_xff]\n"
+            "pattern = \\.bad$\n"
+            "xFilesFactor = 1.5\n"
+            "aggregationMethod = average\n"
+        ))
+        with patch.object(log, 'msg') as log_mock:
+            schema_list = self._load()
+        self.assertEqual([schema.name for schema in schema_list], ['good', 'default'])
+        self.assertTrue(log_mock.called)
+
+    def test_xfilesfactor_not_a_float_section_is_skipped(self):
+        self._writeAggregationConfig(self.VALID_SECTION + (
+            "[bad_xff]\n"
+            "pattern = \\.bad$\n"
+            "xFilesFactor = not-a-float\n"
+            "aggregationMethod = average\n"
+        ))
+        with patch.object(log, 'msg') as log_mock:
+            schema_list = self._load()
+        self.assertEqual([schema.name for schema in schema_list], ['good', 'default'])
+        self.assertTrue(log_mock.called)
+
+    def test_unsupported_aggregation_method_section_is_skipped(self):
+        self._writeAggregationConfig(self.VALID_SECTION + (
+            "[bad_method]\n"
+            "pattern = \\.bad$\n"
+            "xFilesFactor = 0.5\n"
+            "aggregationMethod = not-a-real-method\n"
+        ))
+        with patch.object(log, 'msg') as log_mock:
+            schema_list = self._load()
+        self.assertEqual([schema.name for schema in schema_list], ['good', 'default'])
+        self.assertTrue(log_mock.called)
+
+    def test_invalid_pattern_section_is_skipped(self):
+        self._writeAggregationConfig(self.VALID_SECTION + (
+            "[bad_pattern]\n"
+            "pattern = [unclosed\n"
+            "xFilesFactor = 0.5\n"
+            "aggregationMethod = average\n"
+        ))
+        with patch.object(log, 'msg') as log_mock:
+            schema_list = self._load()
+        self.assertEqual([schema.name for schema in schema_list], ['good', 'default'])
+        self.assertTrue(log_mock.called)
+
+    def test_missing_pattern_section_is_skipped(self):
+        self._writeAggregationConfig(self.VALID_SECTION + (
+            "[no_pattern]\n"
+            "xFilesFactor = 0.5\n"
+            "aggregationMethod = average\n"
+        ))
+        with patch.object(log, 'msg') as log_mock:
+            schema_list = self._load()
+        self.assertEqual([schema.name for schema in schema_list], ['good', 'default'])
+        self.assertTrue(log_mock.called)
+
+    def test_all_sections_invalid_still_returns_default_schema(self):
+        self._writeAggregationConfig(
+            "[bad_xff]\n"
+            "pattern = \\.bad$\n"
+            "xFilesFactor = 2\n"
+            "aggregationMethod = average\n"
+        )
+        with patch.object(log, 'msg'):
+            schema_list = self._load()
+        from carbon.storage import defaultAggregation
+        self.assertEqual(schema_list, [defaultAggregation])

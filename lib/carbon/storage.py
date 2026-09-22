@@ -137,21 +137,26 @@ def loadAggregationSchemas():
       if xFilesFactor is not None:
         xFilesFactor = float(xFilesFactor)
         if not 0 <= xFilesFactor <= 1:
-          raise AssertionError("xFilesFactor value out of [0,1] bounds")
+          raise ValueError(
+            "xFilesFactor %r is out of the [0, 1] bounds" % xFilesFactor)
       if aggregationMethod is not None:
         if state.database is not None:
           if aggregationMethod not in state.database.aggregationMethods:
-            raise AssertionError("aggregationMethod not found in state.database.aggregationMethods")
-    except ValueError:
-      log.msg("Invalid schemas found in %s." % section)
-      continue
+            raise ValueError(
+              "aggregationMethod %r is not supported by the database "
+              "(supported: %s)" % (
+                aggregationMethod,
+                ', '.join(state.database.aggregationMethods)))
 
-    archives = (xFilesFactor, aggregationMethod)
+      archives = (xFilesFactor, aggregationMethod)
 
-    if pattern:
+      if not pattern:
+        raise ValueError("section missing 'pattern'")
+
       mySchema = PatternSchema(section, pattern, archives)
-    else:
-      log.err("Section missing 'pattern': %s" % section)
+    except (ValueError, re.error) as exc:
+      log.msg("Invalid aggregation schema %r in %s: %s, skipping section" %
+              (section, STORAGE_AGGREGATION_CONFIG, exc))
       continue
 
     schemaList.append(mySchema)

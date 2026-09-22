@@ -243,9 +243,17 @@ def reloadStorageSchemas():
 def reloadAggregationSchemas():
   global AGGREGATION_SCHEMAS
   try:
-    AGGREGATION_SCHEMAS = loadAggregationSchemas()
+    new_schemas = loadAggregationSchemas()
   except Exception as e:
+    # Keep serving with the last successfully loaded schema set instead of
+    # poisoning it with a partial result or killing the LoopingCall.
+    log.err()
     log.msg("Failed to reload aggregation SCHEMAS: %s" % (e))
+  else:
+    if new_schemas:
+      AGGREGATION_SCHEMAS = new_schemas
+    else:
+      log.msg("Rejecting empty aggregation SCHEMAS reload, keeping previous schemas")
 
 
 def shutdownModifyUpdateSpeed():
